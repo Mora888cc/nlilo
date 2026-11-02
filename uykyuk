@@ -1,0 +1,709 @@
+--=====================================================================
+-- neverse.lua — Neverlose (CS2) / hardened build
+-- В консоли nl должно появиться: [neverse] loaded ok
+-- Если нет — там же будет точная строка ошибки.
+--=====================================================================
+
+local DEBUG = true
+
+--====================== 0. LUA COMPAT ================================
+local unpack = table.unpack or unpack
+
+local function pack(...)
+    return { n = select("#", ...), ... }
+end
+
+local function log(...)
+    local parts = {}
+    for i = 1, select("#", ...) do
+        parts[#parts + 1] = tostring((select(i, ...)))
+    end
+    local s = "[neverse] " .. table.concat(parts, " ")
+    local done = false
+    for _, path in ipairs({ "client.log", "client.color_log", "console.log" }) do
+        local cur = _G
+        local ok = true
+        for p in path:gmatch("[^%.]+") do
+            if type(cur) ~= "table" then ok = false break end
+            cur = cur[p]
+        end
+        if ok and type(cur) == "function" then
+            if pcall(cur, s) then done = true break end
+            if pcall(cur, 255, 255, 255, s) then done = true break end
+        end
+    end
+    if not done then pcall(print, s) end
+end
+
+local function api(path)
+    local cur = _G
+    for p in path:gmatch("[^%.]+") do
+        if type(cur) ~= "table" then return nil end
+        cur = cur[p]
+    end
+    return cur
+end
+
+local function call(path, ...)
+    local f = api(path)
+    if type(f) ~= "function" then return nil end
+    local r = pack(pcall(f, ...))
+    if r[1] then return unpack(r, 2, r.n) end
+    return nil
+end
+
+--====================== 1. UI LAYER ==================================
+local UI = api("ui") or {}
+
+local function uiNew(names, ...)
+    local args = pack(...)
+    for _, n in ipairs(names) do
+        local f = UI[n]
+        if type(f) == "function" then
+            local ok, o = pcall(f, unpack(args, 1, args.n))
+            if ok and o then return o end
+        end
+    end
+    return nil
+end
+
+local function setItem(item, v)
+    if not item then return end
+    for _, n in ipairs({ "set" }) do
+        if type(UI[n]) == "function" then
+            if pcall(UI[n], item, v) then return end
+        end
+    end
+    if type(item) == "table" and item.set then pcall(item.set, item, v) end
+end
+
+local function get(item, def)
+    if not item then return def end
+    local v = call("ui.get", item)
+    if v ~= nil then return v end
+    if type(item) == "table" and item.get then
+        local ok, r = pcall(item.get, item)
+        if ok and r ~= nil then return r end
+    end
+    if type(item) == "function" then
+        local ok, r = pcall(item)
+        if ok and r ~= nil then return r end
+    end
+    return def
+end
+
+local function on(item, fn)
+    if not item then return end
+    for _, path in ipairs({ "ui.set_callback", "ui.set_on_change", "ui.set_change_callback" }) do
+        local f = api(path)
+        if type(f) == "function" then
+            if pcall(f, item, fn) then return end
+        end
+    end
+    if type(item) == "table" and item.set_callback then
+        pcall(item.set_callback, item, fn)
+    end
+end
+
+local function check(tab, grp, label, def)
+    local o = uiNew({ "new_checkbox", "add_checkbox", "create_checkbox" }, tab, grp, label)
+    if not o then return nil end
+    if def ~= nil then
+        local cur = get(o, nil)
+        if cur == nil then setItem(o, def) end
+    end
+    return o
+end
+
+local function slider(tab, grp, label, mn, mx, def, suffix)
+    local o = uiNew({ "new_slider", "add_slider", "create_slider" },
+                    tab, grp, label, mn, mx, def, 1, suffix or "")
+    if not o then
+        o = uiNew({ "new_slider", "add_slider", "create_slider" },
+                  tab, grp, label, mn, mx, def)
+    end
+    return o
+end
+
+local function combo(tab, grp, label, items, def)
+    local o = uiNew({ "new_combobox", "add_combobox", "create_combobox" },
+                    tab, grp, label, items)
+    if not o then
+        o = uiNew({ "new_combobox", "add_combobox", "create_combobox" },
+                  tab, grp, label, unpack(items))
+    end
+    if o and def then setItem(o, def) end
+    return o
+end
+
+local function colorpick(tab, grp, label, r, g, b, a)
+    return uiNew({ "new_color_picker", "add_color_picker", "create_color_picker" },
+                 tab, grp, label, r, g, b, a)
+end
+
+local function hotkey(tab, grp, label)
+    return uiNew({ "new_hotkey", "add_hotkey", "create_hotkey" }, tab, grp, label)
+end
+
+--====================== 2. MENU ======================================
+local A, V, M = "Aimbot", "Visuals", "Misc"
+local built = 0
+
+local RB, SA, RC, PL, WD, MN = {}, {}, {}, {}, {}, {}
+
+local function mark(o)
+    if o then built = built + 1 end
+    return o
+end
+
+RB.enable    = mark(check(A, "Ragebot", "Enable Ragebot", true))
+RB.priority  = mark(combo(A, "Ragebot", "Target Priority",
+                     { "Closest to crosshair", "Lowest health", "Closest distance" },
+                     "Closest to crosshair"))
+RB.hitbox    = mark(combo(A, "Ragebot", "Hitbox",
+                     { "Head", "Neck", "Chest", "Stomach", "Pelvis" }, "Head"))
+RB.hitchance = mark(slider(A, "Ragebot", "Hitchance", 0, 100, 74, "%"))
+RB.mindmg    = mark(slider(A, "Ragebot", "Min Damage", 0, 130, 100, ""))
+RB.fov       = mark(slider(A, "Ragebot", "FOV", 0, 360, 180, "°"))
+RB.silent    = mark(check(A, "Ragebot", "Silent Aim", true))
+RB.autowall  = mark(check(A, "Ragebot", "Auto Wall", true))
+RB.autoscope = mark(check(A, "Ragebot", "Auto Scope", false))
+RB.autostop  = mark(check(A, "Ragebot", "Auto Stop", true))
+RB.prefbaim  = mark(check(A, "Ragebot", "Prefer Baim", false))
+RB.alwbaim   = mark(check(A, "Ragebot", "Always Baim", false))
+RB.dtap      = mark(check(A, "Ragebot", "Double Tap", false))
+RB.hideshots = mark(check(A, "Ragebot", "Hide Shots", false))
+
+SA.enabled   = mark(check(A, "Silent", "Enable Silent", true))
+SA.silent    = mark(check(A, "Silent", "Silent (no camera)", true))
+SA.smooth    = mark(slider(A, "Silent", "Smooth", 1, 20, 1, "x"))
+SA.fov       = mark(slider(A, "Silent", "Silent FOV", 0, 360, 180, "°"))
+SA.team      = mark(check(A, "Silent", "Team Check", true))
+SA.vis       = mark(check(A, "Silent", "Visibility Check", false))
+SA.autofire  = mark(check(A, "Silent", "Auto Fire", false))
+SA.maxdist   = mark(slider(A, "Silent", "Max Distance", 100, 8000, 4000, "u"))
+SA.key       = mark(hotkey(A, "Silent", "Silent Key"))
+
+RC.enable    = mark(check(A, "Recoil", "RCS", true))
+RC.horizontal= mark(slider(A, "Recoil", "Horizontal", 0, 100, 0, "%"))
+RC.vertical  = mark(slider(A, "Recoil", "Vertical", 0, 100, 0, "%"))
+RC.autofire  = mark(check(A, "Recoil", "Auto Fire", false))
+RC.autopistol= mark(check(A, "Recoil", "Auto Pistol", false))
+RC.backtrack = mark(check(A, "Recoil", "Backtrack", true))
+RC.btms      = mark(slider(A, "Recoil", "Backtrack ms", 0, 200, 140, "ms"))
+
+PL.enable    = mark(check(V, "Players", "Enable ESP", true))
+PL.box       = mark(check(V, "Players", "Box", true))
+PL.name      = mark(check(V, "Players", "Name", true))
+PL.health    = mark(check(V, "Players", "Health", true))
+PL.distance  = mark(check(V, "Players", "Distance", true))
+PL.tracer    = mark(check(V, "Players", "Tracer", false))
+PL.chams     = mark(check(V, "Players", "Chams", true))
+PL.color     = mark(colorpick(V, "Players", "ESP / Chams Color", 255, 60, 60, 255))
+PL.team      = mark(check(V, "Players", "Team Check", true))
+PL.maxdist   = mark(slider(V, "Players", "Max Distance", 100, 5000, 1500, "u"))
+PL.flags     = mark(check(V, "Players", "Flags", true))
+
+WD.fovcircle = mark(check(V, "World", "FOV Circle", true))
+WD.crosshair = mark(check(V, "World", "Crosshair", false))
+
+MN.watermark = mark(check(M, "Main", "Watermark", true))
+MN.indicators= mark(check(M, "Main", "Indicators", true))
+MN.aimkey    = mark(hotkey(M, "Main", "Aim Key"))
+
+--====================== 3. MATH / ENTITY =============================
+local atan2 = math.atan2 or function(y, x) return math.atan(y, x) end
+
+local function vec(x, y, z) return { x = x, y = y, z = z } end
+
+local function origin(e)
+    local x, y, z = call("entity.get_origin", e)
+    if type(x) ~= "number" then
+        x, y, z = call("entity.get_prop", e, "m_vecOrigin")
+    end
+    if type(x) ~= "number" then return nil end
+    return vec(x, y, z)
+end
+
+local function eye(e)
+    local o = origin(e)
+    if not o then return nil end
+    return vec(o.x, o.y, o.z + 64)
+end
+
+local function alive(e)
+    if not e then return false end
+    local a = call("entity.is_alive", e)
+    if a ~= nil then return a and true or false end
+    return call("entity.get_prop", e, "m_lifeState") == 0
+end
+
+local function health(e) return call("entity.get_prop", e, "m_iHealth") or 0 end
+local function team(e)   return call("entity.get_prop", e, "m_iTeamNum") or 0 end
+local function pname(e)  return call("entity.get_player_name", e) or "player" end
+
+local function hitpos(e, idx)
+    local x, y, z = call("entity.hitbox_position", e, idx)
+    if type(x) ~= "number" then return nil end
+    return vec(x, y, z)
+end
+
+local HITBOX = { Head = 0, Neck = 1, Chest = 4, Stomach = 5, Pelvis = 6 }
+
+local function view_angles()
+    local p, y = call("engine.get_view_angles")
+    return p or 0, y or 0
+end
+
+local function write_angles(p, y)
+    if p > 89 then p = 89 end
+    if p < -89 then p = -89 end
+    y = y % 360
+    if y > 180 then y = y - 360 end
+    call("engine.set_view_angles", p, y, 0)
+end
+
+local function calc(src, dst)
+    local dx, dy, dz = dst.x - src.x, dst.y - src.y, dst.z - src.z
+    local yaw   = math.deg(atan2(dy, dx))
+    local pitch = -math.deg(atan2(dz, math.sqrt(dx * dx + dy * dy)))
+    return pitch, yaw
+end
+
+local function adelta(p1, y1, p2, y2)
+    local dp = p1 - p2
+    local dy = math.abs((y1 - y2 + 180) % 360 - 180)
+    return math.sqrt(dp * dp + dy * dy)
+end
+
+local function dist3(a, b)
+    local dx, dy, dz = a.x - b.x, a.y - b.y, a.z - b.z
+    return math.sqrt(dx * dx + dy * dy + dz * dz)
+end
+
+local function enemies()
+    return call("entity.get_players", true) or {}
+end
+
+local function visible(me, e, point)
+    if not get(SA.vis, false) then return true end
+    local src = eye(me)
+    if not src then return false end
+    local frac, ent = call("client.trace_line", src.x, src.y, src.z, point.x, point.y, point.z)
+    if type(frac) ~= "number" then return true end
+    if frac >= 0.97 then return true end
+    return ent == e
+end
+
+--====================== 4. RENDER ====================================
+local TXT = "nl"
+do
+    local f = api("renderer.text")
+    if type(f) == "function" then
+        if not pcall(f, 0, 0, 255, 255, 255, 255, " ", 0) then
+            TXT = "gs"
+        end
+    end
+end
+
+local function txt(x, y, c, s, size)
+    local f = api("renderer.text")
+    if type(f) ~= "function" then return end
+    if TXT == "nl" then
+        if pcall(f, x, y, c[1], c[2], c[3], c[4], s, size or 0) then return end
+    end
+    pcall(f, x, y, c[1], c[2], c[3], c[4], 0, 4096, s)
+end
+
+local function rect(x, y, w, h, c) call("renderer.rect", x, y, w, h, c[1], c[2], c[3], c[4]) end
+local function line(x1, y1, x2, y2, c) call("renderer.line", x1, y1, x2, y2, c[1], c[2], c[3], c[4]) end
+local function circle(x, y, r, c) call("renderer.circle", x, y, c[1], c[2], c[3], c[4], r, 0, 1) end
+
+local function w2s(x, y, z)
+    local sx, sy, a = call("renderer.world_to_screen", x, y, z)
+    if type(sx) ~= "number" then return nil end
+    if a and a <= 0 then return nil end
+    return sx, sy
+end
+
+local function screen()
+    local w, h = call("client.screen_size")
+    return w or 1920, h or 1080
+end
+
+local C = {
+    white  = { 255, 255, 255, 255 },
+    dim    = { 150, 150, 158, 200 },
+    accent = { 92, 120, 255, 255 },
+    heal   = { 70, 220, 130, 255 },
+    hurt   = { 255, 62, 62, 255 },
+    black  = { 0, 0, 0, 200 },
+}
+
+local function esp_color()
+    if PL.color then
+        local r, g, b, a = call("ui.get", PL.color)
+        if type(r) == "number" then return { r, g, b, a or 255 } end
+    end
+    return { 255, 60, 60, 255 }
+end
+
+--====================== 5. BACKTRACK =================================
+local Records = {}
+
+local function record()
+    local now = call("globals.curtime") or 0
+    local ms  = get(RC.btms, 140) / 1000
+    local live = {}
+
+    for _, e in ipairs(enemies()) do
+        if alive(e) then
+            live[e] = true
+            local o = origin(e)
+            if o then
+                Records[e] = Records[e] or {}
+                local list = Records[e]
+                list[#list + 1] = { t = now, p = o }
+                while #list > 0 and now - list[1].t > ms do
+                    table.remove(list, 1)
+                end
+            end
+        end
+    end
+
+    for e in pairs(Records) do
+        if not live[e] then Records[e] = nil end
+    end
+end
+
+local function backtrack_pos(e)
+    local list = Records[e]
+    if not list or #list == 0 then return nil end
+    local want = (call("globals.curtime") or 0) - (get(RC.btms, 140) / 1000)
+    local best, bestd
+    for _, r in ipairs(list) do
+        local d = math.abs(r.t - want)
+        if not bestd or d < bestd then best, bestd = r, d end
+    end
+    return best and best.p or nil
+end
+
+--====================== 6. TARGET ====================================
+local Target, TargetAng = nil, nil
+
+local function pick(me)
+    local src = eye(me)
+    if not src then return nil end
+
+    local vp, vy = view_angles()
+    local fov    = get(SA.fov, 180)
+    local hb     = HITBOX[get(RB.hitbox, "Head")] or 0
+    local myteam = team(me)
+    local maxd   = get(SA.maxdist, 4000)
+    local prio   = get(RB.priority, "Closest to crosshair")
+
+    local best, bestScore, bestAng
+
+    for _, e in ipairs(enemies()) do
+        if alive(e) then
+            local skip = false
+            if get(SA.team, true) and team(e) == myteam then skip = true end
+
+            if not skip then
+                local point = hitpos(e, hb) or hitpos(e, 0)
+                if not point and get(RC.backtrack, true) then
+                    point = backtrack_pos(e)
+                end
+
+                if point then
+                    local d3 = dist3(src, point)
+                    if d3 <= maxd then
+                        local p, y = calc(src, point)
+                        local d = adelta(vp, vy, p, y)
+                        if d <= fov and visible(me, e, point) then
+                            local score
+                            if prio == "Closest to crosshair" then score = d
+                            elseif prio == "Lowest health" then score = health(e)
+                            else score = d3 end
+                            if not bestScore or score < bestScore then
+                                best, bestScore, bestAng = e, score, { p, y }
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return best, bestAng
+end
+
+--====================== 7. AIM =======================================
+local keyHeld   = true
+local aimToggle = true
+
+on(SA.key,    function() keyHeld   = not keyHeld   end)
+on(MN.aimkey, function() aimToggle = not aimToggle end)
+
+local function is_attack(cmd)
+    if not cmd then return true end
+    local ok, v = pcall(function() return cmd.in_attack end)
+    if ok and v ~= nil then return v == 1 or v == true end
+    return true
+end
+
+local function silent_aim(cmd)
+    Target, TargetAng = nil, nil
+    if not get(SA.enabled, true) then return end
+    if not (keyHeld and aimToggle) then return end
+
+    local me = call("entity.get_local_player")
+    if not alive(me) then return end
+
+    local e, ang = pick(me)
+    if not e or not ang then return end
+    Target, TargetAng = e, ang
+
+    if get(SA.silent, true) then
+        if not is_attack(cmd) then return end
+        if cmd and cmd.set_view_angles then
+            if pcall(function() cmd:set_view_angles(ang[1], ang[2], 0) end) then return end
+        end
+        write_angles(ang[1], ang[2])
+    else
+        local vp, vy = view_angles()
+        local f = 1 / math.max(1, get(SA.smooth, 1))
+        write_angles(vp + (ang[1] - vp) * f,
+                     vy + ((ang[2] - vy + 180) % 360 - 180) * f)
+    end
+
+    if get(SA.autofire, false) and cmd then
+        pcall(function() cmd.in_attack = 1 end)
+    end
+end
+
+--====================== 8. RCS =======================================
+local rcs_x, rcs_y = 0, 0
+
+local function rcs()
+    if not get(RC.enable, true) then return end
+    local me = call("entity.get_local_player")
+    if not alive(me) then return end
+    local hp = get(RC.horizontal, 0) / 100
+    local vp = get(RC.vertical, 0) / 100
+    if hp == 0 and vp == 0 then return end
+    if rcs_x ~= 0 or rcs_y ~= 0 then
+        local p, y = view_angles()
+        write_angles(p - rcs_x * (1 - vp), y - rcs_y * (1 - hp))
+        rcs_x, rcs_y = 0, 0
+    end
+end
+
+--====================== 9. ESP =======================================
+local function draw_box(x1, y1, x2, y2, col)
+    line(x1, y1, x2, y1, col)
+    line(x1, y2, x2, y2, col)
+    line(x1, y1, x1, y2, col)
+    line(x2, y1, x2, y2, col)
+end
+
+local function draw_esp()
+    if not get(PL.enable, true) then return end
+    local me     = call("entity.get_local_player")
+    local eyePos = me and eye(me)
+    local col    = esp_color()
+    local myteam = me and team(me) or 0
+    local maxd   = get(PL.maxdist, 1500)
+    local sw, sh = screen()
+
+    for _, e in ipairs(enemies()) do
+        if alive(e) then
+            local skip = false
+            if get(PL.team, true) and team(e) == myteam then skip = true end
+            if not skip then
+                local o, head = origin(e), hitpos(e, 0)
+                if o and head then
+                    local d = eyePos and dist3(eyePos, o) or 0
+                    if d <= maxd then
+                        local hx, hy = w2s(head.x, head.y, head.z + 8)
+                        local fx, fy = w2s(o.x, o.y, o.z)
+                        if hx and fx then
+                            local h = math.abs(fy - hy)
+                            local w = h * 0.5
+                            local x = hx - w * 0.5
+                            if get(PL.box, true) then draw_box(x, hy, x + w, fy, col) end
+                            if get(PL.health, true) then
+                                local hp = math.max(0, math.min(1, health(e) / 100))
+                                rect(x - 5, hy, 2, h, C.black)
+                                rect(x - 5, fy - h * hp, 2, h * hp,
+                                     hp > 0.5 and C.heal or C.hurt)
+                            end
+                            if get(PL.name, true) then txt(hx, hy - 14, col, pname(e)) end
+                            if get(PL.distance, true) then
+                                txt(hx, fy + 2, C.dim, string.format("%d m", math.floor(d / 48)))
+                            end
+                            if get(PL.flags, true) then
+                                txt(x + w + 4, hy + 1, C.dim, health(e) .. " hp")
+                            end
+                            if get(PL.tracer, false) then line(sw / 2, sh, hx, fy, col) end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+--====================== 10. VISUALS ==================================
+local function draw_fov()
+    if not get(WD.fovcircle, true) then return end
+    local sw, sh = screen()
+    local r = (sw / 2) * math.tan(math.rad(get(SA.fov, 180) * 0.5))
+    circle(sw / 2, sh / 2, math.max(6, r), Target and C.heal or C.dim)
+end
+
+local function draw_crosshair()
+    if not get(WD.crosshair, false) then return end
+    local sw, sh = screen()
+    rect(sw / 2 - 1, sh / 2 - 1, 2, 2, C.white)
+end
+
+local function draw_lock()
+    if not (Target and TargetAng) then return end
+    local o = origin(Target)
+    if not o then return end
+    local sx, sy = w2s(o.x, o.y, o.z + 72)
+    if sx then txt(sx, sy - 12, C.heal, "LOCK") end
+end
+
+local function draw_watermark()
+    if not get(MN.watermark, true) then return end
+    local sw = screen()
+    local flags = {}
+    if get(SA.enabled, true)  then flags[#flags + 1] = "SILENT" end
+    if get(SA.silent, true)   then flags[#flags + 1] = "HIDE"   end
+    if get(RC.enable, true)   then flags[#flags + 1] = "RCS"    end
+    if get(PL.enable, true)   then flags[#flags + 1] = "ESP"    end
+    if get(PL.chams, true)    then flags[#flags + 1] = "CHAMS"  end
+    txt(sw - 292, 12, C.accent, "neverse")
+    txt(sw - 228, 12, C.white, "| " .. table.concat(flags, "  "))
+end
+
+local function draw_indicators()
+    if not get(MN.indicators, true) then return end
+    local sw, sh = screen()
+    local y = sh / 2 + 40
+    if Target then
+        txt(sw / 2 + 40, y, C.heal, "target: " .. pname(Target))
+        y = y + 14
+    end
+    if get(SA.autofire, false) then txt(sw / 2 + 40, y, C.hurt, "auto fire") end
+end
+
+--====================== 11. CHAMS ====================================
+local function apply_chams()
+    local col = esp_color()
+    local packed = col[1] + col[2] * 256 + col[3] * 65536
+    local enabled = get(PL.chams, true)
+    for _, e in ipairs(enemies()) do
+        if alive(e) then
+            if enabled then
+                call("entity.set_prop", e, "m_bGlowEnabled", 1)
+                call("entity.set_prop", e, "m_iGlowType", 3)
+                call("entity.set_prop", e, "m_nGlowRange", 0)
+                call("entity.set_prop", e, "m_glowColorOverride", packed)
+            else
+                call("entity.set_prop", e, "m_bGlowEnabled", 0)
+            end
+        end
+    end
+end
+
+--====================== 12. HOOKS ====================================
+local HookPath = nil
+
+local function find_hook()
+    if HookPath then return HookPath end
+    for _, p in ipairs({
+        "client.set_event_callback",
+        "client.register_callback",
+        "engine.set_event_callback",
+    }) do
+        if type(api(p)) == "function" then HookPath = p return p end
+    end
+    return nil
+end
+
+local function on_event(ev, fn)
+    local p = find_hook()
+    if not p then return false end
+    local f = api(p)
+    if pcall(f, ev, fn) then return true end
+    if pcall(f, { [ev] = fn }) then return true end
+    return false
+end
+
+local registered = 0
+
+local function hook(ev, fn)
+    if on_event(ev, fn) then registered = registered + 1 end
+end
+
+hook("setup_command", function(cmd)
+    pcall(function()
+        record()
+        rcs()
+        silent_aim(cmd)
+    end)
+end)
+
+hook("net_update_end", function() pcall(record) end)
+
+hook("paint", function()
+    pcall(draw_esp)
+    pcall(draw_fov)
+    pcall(draw_crosshair)
+    pcall(draw_lock)
+    pcall(draw_watermark)
+    pcall(draw_indicators)
+    pcall(apply_chams)
+end)
+
+hook("round_start", function()
+    Records = {}
+    rcs_x, rcs_y = 0, 0
+    Target, TargetAng = nil, nil
+end)
+
+hook("level_init", function()
+    Records = {}
+    Target, TargetAng = nil, nil
+end)
+
+hook("shutdown", function()
+    Records = {}
+    local setProp = api("entity.set_prop")
+    if type(setProp) == "function" then
+        for _, e in ipairs(call("entity.get_players", false) or {}) do
+            pcall(setProp, e, "m_bGlowEnabled", 0)
+        end
+    end
+end)
+
+--====================== 13. SELF TEST ================================
+if DEBUG then
+    log(string.format("loaded ok | ui items: %d | hooks: %d | text: %s",
+        built, registered, TXT))
+    if built == 0 then
+        log("WARN: ui.new_* не создал ни одного элемента — проверь имена табов/групп")
+    end
+    if registered == 0 then
+        log("WARN: set_event_callback не найден — логика не подключится")
+    end
+    if type(api("renderer.text")) ~= "function" then
+        log("WARN: renderer.text недоступен — визуалы не нарисуются")
+    end
+    if type(api("entity.get_players")) ~= "function" then
+        log("WARN: entity.get_players недоступен")
+    end
+end
